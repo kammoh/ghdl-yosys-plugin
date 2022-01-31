@@ -671,7 +671,15 @@ void dump_memory(std::ostream &f, std::string indent, Mem &mem)
 				if( clk_to_lof_body.count(clk_domain_str) == 0 )
 					clk_to_lof_body[clk_domain_str] = std::vector<std::string>();
 			}
-			if (!port.transparent)
+			bool transparent = false;
+			for (int j = 0; j < GetSize(mem.wr_ports); j++) {
+				if (port.transparency_mask[j]) {
+					// Our implementation of transparent read ports reads en, addr and data from every write port
+					// the read port is transparent with.
+					transparent = true;
+				}
+			}
+			if (!transparent)
 			{
 				// for clocked read ports make something like:
 				//   reg [..] temp_id;
@@ -1551,9 +1559,11 @@ bool dump_cell_expr(std::ostream &f, std::string indent, RTLIL::Cell *cell)
 	if (RTLIL::builtin_ff_cell_types().count(cell->type))
 	{ // porting needs testing
 		FfData ff(nullptr, cell);
+		bool has_d = cell->hasPort(ID::D);
+		SigSpec sig_en = cell->getPort(ID::EN);
 
 		// $ff / $_FF_ cell: not supported.
-		if (ff.has_d && !ff.has_clk && !ff.has_en)
+		if (has_d && !ff.has_clk && !ff.has_ce)
 			return false;
 
 		std::string reg_name = cellname(cell);
@@ -1566,7 +1576,7 @@ bool dump_cell_expr(std::ostream &f, std::string indent, RTLIL::Cell *cell)
 			sensitivity_set.insert(ff.sig_clk);
 		} else {
 			sensitivity_set.insert(ff.sig_d);
-			sensitivity_set.insert(ff.sig_en);
+			sensitivity_set.insert(sig_en);
 		}
 		if (ff.has_sr) {
 			sensitivity_set.insert(ff.sig_clr);
@@ -1605,11 +1615,11 @@ bool dump_cell_expr(std::ostream &f, std::string indent, RTLIL::Cell *cell)
 			std::string reg_bit_name;
 			if (chunky) {
 				reg_bit_name = stringf("%s(%d)", reg_name.c_str(), i);
-				if (ff.has_d)
+				if (has_d)
 					sig_d = ff.sig_d[i];
 			} else {
 				reg_bit_name = reg_name;
-				if (ff.has_d)
+				if (has_d)
 					sig_d = ff.sig_d;
 			}
 			if (ff.has_arst)
@@ -1655,11 +1665,11 @@ bool dump_cell_expr(std::ostream &f, std::string indent, RTLIL::Cell *cell)
 				dump_sigspec(f, ff.sig_clk);
 				f << stringf(") then\n");
 				// ff.ce_over_srst means sync-reset is also gated by enable
-				if (ff.has_srst && ff.has_en && ff.ce_over_srst) {
+				if (ff.has_srst && ff.has_ce && ff.ce_over_srst) {
 					f << stringf("%s" "    if", indent.c_str());
-					f << stringf(" %s then\n", sigbit_equal_bool(ff.sig_en.as_bit(), ff.pol_en).c_str());
-					//dump_sigspec(f, ff.sig_en);
-					//f << stringf(" = '%c' then\n", ff.pol_en ? '1' : '0');
+					f << stringf(" %s then\n", sigbit_equal_bool(sig_en.as_bit(), ff.pol_ce).c_str());
+					//dump_sigspec(f, sig_en);
+					//f << stringf(" = '%c' then\n", ff.pol_ce ? '1' : '0');
 					f << stringf("%s" "      if", indent.c_str());
 					f << stringf(" %s then\n", sigbit_equal_bool(ff.sig_srst.as_bit(), ff.pol_srst).c_str());
 					//dump_sigspec(f, ff.sig_srst);
@@ -1674,7 +1684,7 @@ bool dump_cell_expr(std::ostream &f, std::string indent, RTLIL::Cell *cell)
 					f << stringf("%s" "      end if;\n", indent.c_str());
 					f << stringf("%s" "    end if;\n", indent.c_str());
 				} else {
-					if (!ff.has_srst && !ff.has_en) {
+					if (!ff.has_srst && !ff.has_ce) {
 						f << stringf("%s" "    %s %s ", indent.c_str(), reg_bit_name.c_str(), assignment_operator.c_str());
 						dump_sigspec(f, sig_d);
 						f << stringf(";\n");
@@ -1686,9 +1696,9 @@ bool dump_cell_expr(std::ostream &f, std::string indent, RTLIL::Cell *cell)
 							dump_sigspec(f, val_srst);
 							f << stringf(";\n");
 						}
-						if (ff.has_en) {
+						if (ff.has_ce) {
 							f << stringf("%s" "    %s ", indent.c_str(), ff.has_srst ? "elsif" : "if");
-							f << stringf("%s then\n", sigbit_equal_bool(ff.sig_en.as_bit(), ff.pol_en).c_str());
+							f << stringf("%s then\n", sigbit_equal_bool(sig_en.as_bit(), ff.pol_ce).c_str());
 						} else {
 							f << stringf("%s" "    else\n", indent.c_str());
 						}
@@ -1719,7 +1729,7 @@ bool dump_cell_expr(std::ostream &f, std::string indent, RTLIL::Cell *cell)
 					//f << stringf(" = '%c' then\n", ff.pol_set ? '1' : '0');
 					f << stringf("%s" "    %s %s '1';\n", indent.c_str(), 
 							reg_bit_name.c_str(), assignment_operator.c_str());
-					if (ff.has_d)
+					if (has_d)
 						f << stringf("%s" "  els", indent.c_str());
 				} else if (ff.has_arst) {
 					f << stringf("if (");
@@ -1730,14 +1740,14 @@ bool dump_cell_expr(std::ostream &f, std::string indent, RTLIL::Cell *cell)
 							reg_bit_name.c_str(), assignment_operator.c_str());
 					dump_sigspec(f, val_arst);
 					f << stringf(";\n");
-					if (ff.has_d)
+					if (has_d)
 						f << stringf("%s" "  els", indent.c_str());
 				}
-				if (ff.has_d) {
+				if (has_d) {
 					f << stringf("if ");
-					f << stringf("%s then\n", sigbit_equal_bool(ff.sig_en.as_bit(), ff.pol_en).c_str());
-					//dump_sigspec(f, ff.sig_en);
-					//f << stringf(" = '%c' then\n", ff.pol_en ? '1' : '0');
+					f << stringf("%s then\n", sigbit_equal_bool(sig_en.as_bit(), ff.pol_ce).c_str());
+					//dump_sigspec(f, sig_en);
+					//f << stringf(" = '%c' then\n", ff.pol_ce ? '1' : '0');
 					f << stringf("%s" "    %s %s ", indent.c_str(),
 							reg_bit_name.c_str(), assignment_operator.c_str());
 					dump_sigspec(f, sig_d);
