@@ -5,38 +5,74 @@ set -e
 cd "$(dirname $0)"
 . ./utils.sh
 
-# To build latest GHDL from sources, uncomment the following block
-# and replace --from=ghdl/pkg:buster-mcode below with --from=tmp
+#--
 
-#docker build -t tmp - <<-EOF
-#FROM ghdl/build:buster-mcode
-#RUN apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get -y install --no-install-recommends \
-#    ca-certificates curl && update-ca-certificates \
-# && mkdir -p ghdl && cd ghdl \
-# && curl -fsSL "$GHDL_URL" | tar xzf - --strip-components=1 \
-# && ./configure --enable-libghdl --enable-synth \
-# && make all \
-# && make DESTDIR=/opt/ghdl install
-#EOF
+do_ghdl () {
+
+gstart "[Build] tmp" "$ANSI_MAGENTA"
+
+docker build -t tmp - <<-EOF
+FROM ghdl/build:bullseye-mcode AS build
+RUN apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get -y install --no-install-recommends \
+    ca-certificates \
+    git \
+ && update-ca-certificates \
+ && git clone https://github.com/ghdl/ghdl \
+ && cd ghdl \
+ && ./configure --enable-libghdl --enable-synth \
+ && make all \
+ && make DESTDIR=/opt/ghdl install
+ FROM scratch
+ COPY --from=build /opt/ghdl /ghdl
+EOF
+
+export GHDL_PKG_IMAGE=tmp
+
+gend
+
+}
 
 #--
 
 do_plugin () {
 
+# To build latest GHDL from sources, uncomment the following line
+#do_ghdl
+
 gstart "[Build] ghdl/synth:beta" "$ANSI_MAGENTA"
 
 docker build -t ghdl/synth:beta . -f- <<-EOF
-FROM ghdl/cache:yosys-gnat AS build
-COPY --from=ghdl/pkg:buster-mcode / /opt/ghdl
+ARG REGISTRY='gcr.io/hdl-containers/debian/bullseye'
+
+#---
+
+# WORKAROUND: this is required because 'COPY --from' does not support ARGs
+FROM \$REGISTRY/pkg/ghdl AS pkg-ghdl
+
+FROM \$REGISTRY/yosys AS base
+
+RUN apt-get update -qq \
+ && DEBIAN_FRONTEND=noninteractive apt-get -y install --no-install-recommends \
+    libgnat-9 \
+ && apt-get autoclean && apt-get clean && apt-get -y autoremove \
+ && rm -rf /var/lib/apt/lists
+
+COPY --from=${GHDL_PKG_IMAGE:-pkg-ghdl} /ghdl /
+
+#---
+
+FROM base AS build
+
 COPY . /ghdlsynth
 
-RUN cp -vr /opt/ghdl/* /usr/local \
- && cd /ghdlsynth \
+RUN cd /ghdlsynth \
  && make \
- && cp ghdl.so /opt/ghdl/lib/ghdl_yosys.so
+ && cp ghdl.so /tmp/ghdl_yosys.so
 
-FROM ghdl/cache:yosys-gnat
-COPY --from=build /opt/ghdl /usr/local
+#---
+
+FROM base
+COPY --from=build /tmp/ghdl_yosys.so /usr/local/lib/
 RUN yosys-config --exec mkdir -p --datdir/plugins \
  && yosys-config --exec ln -s /usr/local/lib/ghdl_yosys.so --datdir/plugins/ghdl.so
 EOF
@@ -50,11 +86,20 @@ gend
 do_formal () {
 
 gstart "[Build] ghdl/synth:formal" "$ANSI_MAGENTA"
-docker build -t ghdl/synth:formal . -f- <<-EOF
-FROM hdlc/ghdl:yosys
 
-COPY --from=hdlc/pkg:z3 /z3 /
-COPY --from=hdlc/pkg:symbiyosys /symbiyosys /
+docker build -t ghdl/synth:formal . -f- <<-EOF
+ARG REGISTRY='gcr.io/hdl-containers/debian/bullseye'
+
+#--
+
+# WORKAROUND: this is required because 'COPY --from' does not support ARGs
+FROM \$REGISTRY/pkg/z3 AS pkg-z3
+FROM \$REGISTRY/pkg/symbiyosys AS pkg-symbiyosys
+
+FROM ghdl/synth:beta
+
+COPY --from=pkg-z3 /z3 /
+COPY --from=pkg-symbiyosys /symbiyosys /
 
 RUN apt-get update -qq \
  && DEBIAN_FRONTEND=noninteractive apt-get -y install --no-install-recommends \
@@ -62,7 +107,8 @@ RUN apt-get update -qq \
  && apt-get autoclean && apt-get clean && apt-get -y autoremove \
  && rm -rf /var/lib/apt/lists/*
 EOF
-gend "formal"
+
+gend
 
 }
 

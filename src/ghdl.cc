@@ -179,8 +179,6 @@ static RTLIL::SigSpec get_src_extract(std::vector<RTLIL::Wire *> &net_map, Net n
 {
 	Instance inst = get_net_parent(n);
 	switch(get_id(inst)) {
-        case Id_Signal:
-	case Id_Isignal:
 	case Id_Port:
         case Id_Output:
                 return get_src_extract(net_map, get_input_net(inst, 0), off, wd);
@@ -213,8 +211,6 @@ static RTLIL::SigSpec get_src(std::vector<RTLIL::Wire *> &net_map, Net n)
 	Instance inst = get_net_parent(n);
 	switch(get_id(inst)) {
 #define IN(N) get_src(net_map, get_input_net(inst, (N)))
-	case Id_Signal:
-	case Id_Isignal:
 	case Id_Port:
 	case Id_Output:
 		return IN(0);
@@ -373,17 +369,20 @@ static IdString build_attribute_id(Attribute attr)
 	return IdString('\\' + string(get_cstr(get_attribute_name(attr))));
 }
 
-//  Convert attributes of INST to OBJ.
-static void add_attributes (RTLIL::AttrObject &obj, Instance inst)
+static void add_attributes_chain(RTLIL::AttrObject &obj, Attribute attr)
 {
-	Attribute attr = get_first_attribute (inst);
-
 	while (attr.id != 0) {
 		IdString id = build_attribute_id(attr);
 		obj.attributes[id] = build_attribute_val(attr);
 
 		attr = get_attribute_next(attr);
 	}
+}
+
+//  Convert attributes of INST to OBJ.
+static void add_attributes_from_instance(RTLIL::AttrObject &obj, Instance inst)
+{
+	add_attributes_chain(obj, get_instance_first_attribute (inst));
 }
 
 //  Extract the polarity from net N (output of an edge gate).
@@ -422,12 +421,10 @@ static void import_memory(RTLIL::Module *module, std::vector<RTLIL::Wire *> &net
 
 	//  Count number of read and write ports.
 	//  Extract width, size, abits.
-	unsigned nbr_rd = 0;
-	unsigned nbr_wr = 0;
+	int nbr_rd = 0;
+	int nbr_wr = 0;
 	unsigned width = 0;
 	unsigned abits = 0;
-	unsigned r_a_w = 0; // Write after read
-	unsigned w_a_r = 0; // Read after write
 	for (Input port = first_port; ;) {
 		Instance port_inst = get_input_parent(port);
 		Net addr;
@@ -438,15 +435,11 @@ static void import_memory(RTLIL::Module *module, std::vector<RTLIL::Wire *> &net
 			dat = get_output(port_inst, 1);
 			addr = get_input_net(port_inst, 1);
 			nbr_rd++;
-			if (nbr_wr)
-			  r_a_w++;
 			break;
 		case Id_Mem_Wr_Sync:
 			dat = get_input_net(port_inst, 4);
 			addr = get_input_net(port_inst, 1);
 			nbr_wr++;
-			if (nbr_rd)
-			  w_a_r++;
 			break;
 		case Id_Memory:
 		case Id_Memory_Init:
@@ -468,117 +461,162 @@ static void import_memory(RTLIL::Module *module, std::vector<RTLIL::Wire *> &net
 		}
 		port = get_first_sink(get_output(port_inst,  0));
 	}
-	if (w_a_r && r_a_w)
-		log_warning("memory %s has read ports after and before write ports", mem_str.c_str());
 
 	unsigned size = get_width(mem_o) / width;
 
 	//  Create the memory.
-	Cell *mem = module->addCell(mem_str, "$mem");
-	mem->parameters["\\MEMID"] = Const(mem_str);
-	mem->parameters["\\WIDTH"] = Const(width);
-	mem->parameters["\\OFFSET"] = Const(0);
-	mem->parameters["\\SIZE"] = Const(size);
-	mem->parameters["\\ABITS"] = Const(abits);
-
-	Const init_data;
-	switch (get_id(inst)) {
-	case Id_Memory:
-		init_data = Const(State::Sx, size * width);
-		break;
-	case Id_Memory_Init:
-		init_data = get_src(net_map, get_input_net(inst, 1)).as_const();
-		break;
-	default:
-		log_assert(0);
-	}
-	mem->parameters["\\INIT"] = init_data;
-	mem->parameters["\\WR_PORTS"] = Const(nbr_wr);
-	mem->parameters["\\RD_PORTS"] = Const(nbr_rd);
+	RTLIL::Memory *mem1 = new RTLIL::Memory;
+	mem1->width = width;
+	mem1->start_offset = 0;
+	mem1->size = size;
+	RTLIL::Memory *mem = module->addMemory(mem_str, mem1);
+	delete mem1;
 
 	//  Set attributes.
-	add_attributes(*mem, inst);
+	add_attributes_from_instance(*mem, inst);
 
-	//  Connect.
-	SigSpec rd_clk;
-	SigSpec rd_addr;
-	SigSpec rd_data;
-	SigSpec rd_en;
-	std::vector<RTLIL::State> rd_clk_en;
-	std::vector<RTLIL::State> rd_clk_pol;
-	SigSpec wr_clk;
-	std::vector<RTLIL::State> wr_clk_pol;
-	SigSpec wr_addr;
-	SigSpec wr_data;
-	SigSpec wr_en;
+	//  Initial value
+	if (get_id(inst) == Id_Memory_Init) {
+		Cell *init = module->addCell(mem_str + "$init", ID($meminit_v2));
+		init->parameters[ID::MEMID] = Const(mem_str);
+		init->parameters[ID::ABITS] = Const(abits);
+		init->parameters[ID::WIDTH] = Const(width);
+		init->parameters[ID::PRIORITY] = Const(0);
+		init->parameters[ID::WORDS] = Const(size);
+		init->setPort(ID::EN, Const(RTLIL::State::S1, width));
+		init->setPort(ID::ADDR, SigSpec(0, abits));
+
+		Net iinp = get_input_net(inst, 1);
+		Instance iinst = get_net_parent(iinp);
+		Module_Id imod = get_id(iinst);
+		if (imod == Id_Signal || imod == Id_Isignal)
+			iinp = get_input_net(iinst, 0);
+		init->setPort(ID::DATA, get_src(net_map, iinp));
+	}
+
+	//  Ports
+	//  The first port is the output of the memory_init/memory cell.
+	//  It points to the first actor (so the one with the least priority).
+	std::vector<RTLIL::State> vec;
 	Net clk_net;
+	int ridx = -1;
+	int widx = -1;
 	for (Input port = first_port; ; ) {
 		Instance port_inst = get_input_parent(port);
+		Input next_port = get_first_sink(get_output(port_inst, 0));
+
+		Module_Id id = get_id(port_inst);
 #define IN(N) get_src(net_map, get_input_net(port_inst, (N)))
 #define OUT(N) get_src(net_map, get_output(port_inst, (N)))
-		switch(get_id(port_inst)) {
+		Cell *p;
+
+		//  Create the cell
+		switch(id) {
 		case Id_Mem_Rd:
-			rd_clk_en.push_back(RTLIL::State::S0);
-			rd_clk.append(RTLIL::State::Sx);
-			rd_clk_pol.push_back(RTLIL::State::S1);
-			rd_addr.append(IN(1));
-			rd_data.append(OUT(1));
-			rd_en.append(Const(1, 1));
-			break;
 		case Id_Mem_Rd_Sync:
-			clk_net = get_input_net(port_inst, 2);
-			rd_clk_en.push_back(RTLIL::State::S1);
-			rd_clk_pol.push_back(extract_clk_pol(clk_net));
-			rd_clk.append(extract_clk_sig(net_map, clk_net));
-			rd_addr.append(IN(1));
-			rd_data.append(OUT(1));
-			rd_en.append(IN(3));
+			p = module->addCell(mem_str + stringf("$r%u", ++ridx),
+					    ID($memrd_v2));
 			break;
 		case Id_Mem_Wr_Sync:
-			clk_net = get_input_net(port_inst, 2);
-			wr_clk_pol.push_back(extract_clk_pol(clk_net));
-			wr_clk.append(extract_clk_sig(net_map, clk_net));
-			wr_addr.append(IN(1));
-			wr_data.append(IN(4));
-			wr_en.append(SigSpec(SigBit(IN(3)), width));
+			p = module->addCell(mem_str + stringf("$w%u", ++widx),
+					    ID($memwr_v2));
 			break;
 		case Id_Memory:
 		case Id_Memory_Init:
-			port.id = 0;
-			break;
+			// Finished
+			return;
 		default:
-			log_assert(0);
+			log_abort();
 		}
-		if (port.id == 0)
+
+		// Common parameters
+		p->parameters[ID::MEMID] = Const(mem_str);
+		p->parameters[ID::ABITS] = Const(abits);
+		p->parameters[ID::WIDTH] = Const(width);
+
+		// Common ports
+		p->setPort(ID::ADDR, IN(1));
+
+		// Common to memrd ports
+		switch(id) {
+		case Id_Mem_Rd:
+		case Id_Mem_Rd_Sync:
+			p->setPort(ID::DATA, OUT(1));
+			p->setPort(ID::ARST, Const(RTLIL::State::S0));
+			p->setPort(ID::SRST, Const(RTLIL::State::S0));
+			p->parameters[ID::ARST_VALUE] = Const(RTLIL::State::Sx, width);
+			p->parameters[ID::SRST_VALUE] = Const(RTLIL::State::Sx, width);
+                        p->parameters[ID::INIT_VALUE] = Const(RTLIL::State::Sx, width);
+                        p->parameters[ID::CE_OVER_SRST] = Const(RTLIL::State::S1);
+			// The read port is transparent to the emitted write ports.
+                        vec.resize(nbr_wr);
+                        for (int j = 0; j < nbr_wr; j++)
+                                vec[j] = j <= widx ? RTLIL::State::S1 : RTLIL::State::S0;
+                        p->parameters[ID::TRANSPARENCY_MASK] = Const(vec);
+                        for (int j = 0; j < nbr_wr; j++)
+                                vec[j] = RTLIL::State::S0;
+                        p->parameters[ID::COLLISION_X_MASK] = Const(vec);
+                        break;
+		case Id_Mem_Wr_Sync:
+                        p->setPort(ID::DATA, IN(4));
+                        p->parameters[ID::PORTID] = Const(widx);
+                        vec.resize(nbr_wr);
+			// Emitted write ports (ie j <= widx) don't have priority.
+                        for (int j = 0; j < nbr_wr; j++)
+                                vec[j] = j <= widx ? RTLIL::State::S0 : RTLIL::State::S1;
+                        p->parameters[ID::PRIORITY_MASK] = Const(vec);
+                        break;
+		default:
+			log_abort();
+                }
+
+                // Clocks
+                switch(id) {
+		case Id_Mem_Rd:
+                        p->parameters[ID::CLK_ENABLE] = Const(RTLIL::State::S0);
+                        p->parameters[ID::CLK_POLARITY] = Const(RTLIL::State::S1);
+                        p->setPort(ID::CLK, Const(RTLIL::State::S0));
+                        p->setPort(ID::EN, Const(RTLIL::State::S1));
 			break;
-		port = get_first_sink(get_output(port_inst, 0));
+		case Id_Mem_Rd_Sync:
+		case Id_Mem_Wr_Sync:
+                        p->parameters[ID::CLK_ENABLE] = Const(RTLIL::State::S1);
+                        clk_net = get_input_net(port_inst, 2);
+                        p->parameters[ID::CLK_POLARITY] = extract_clk_pol(clk_net);
+                        p->setPort(ID::CLK, extract_clk_sig(net_map, clk_net));
+                        p->setPort(ID::EN, SigSpec(SigBit(IN(3)), width));
+                        break;
+		default:
+			log_abort();
+                }
+
+                // EN
+                switch(id) {
+		case Id_Mem_Rd:
+                        p->setPort(ID::EN, Const(RTLIL::State::S1));
+			break;
+		case Id_Mem_Rd_Sync:
+                        p->setPort(ID::EN, IN(3));
+                        break;
+		case Id_Mem_Wr_Sync:
+			p->setPort(ID::EN, SigSpec(SigBit(IN(3)), width));
+                        break;
+		default:
+			log_abort();
+                }
+
+                port = next_port;
 	}
 #undef IN
 #undef OUT
-	mem->parameters["\\RD_CLK_ENABLE"] = nbr_rd ? Const(rd_clk_en) : Const(RTLIL::State::S0);
-	mem->parameters["\\RD_CLK_POLARITY"] = nbr_rd ? Const(rd_clk_pol) : Const(RTLIL::State::S1);
-	mem->parameters["\\RD_TRANSPARENT"] = Const(r_a_w ? RTLIL::State::S1 : RTLIL::State::S0, nbr_rd ? nbr_rd : 1);
-
-	mem->setPort("\\RD_CLK", rd_clk);
-	mem->setPort("\\RD_ADDR", rd_addr);
-	mem->setPort("\\RD_DATA", rd_data);
-	mem->setPort("\\RD_EN", rd_en);
-
-	mem->parameters["\\WR_CLK_ENABLE"] = Const(RTLIL::State::S1, nbr_wr ? nbr_wr : 1);
-	mem->parameters["\\WR_CLK_POLARITY"] = nbr_wr ? Const(wr_clk_pol) : Const(RTLIL::State::S1);
-
-	mem->setPort("\\WR_CLK", wr_clk);
-	mem->setPort("\\WR_ADDR", wr_addr);
-	mem->setPort("\\WR_DATA", wr_data);
-	mem->setPort("\\WR_EN", wr_en);
 }
 
 static void add_formal_input(RTLIL::Module *module, std::vector<RTLIL::Wire *> &net_map, Instance inst, const char *cellname)
 {
 	RTLIL::Cell *cell = module->addCell(to_str(get_instance_name(inst)), cellname);
 	Net n = get_output(inst, 0);
-	cell->setParam("\\WIDTH", get_width(n));
-	cell->setPort("\\Y", get_src(net_map, n));
+	cell->setParam(ID::WIDTH, get_width(n));
+	cell->setPort(ID::Y, get_src(net_map, n));
 }
 
 static bool has_attribute_gclk(Net n)
@@ -592,7 +630,7 @@ static bool has_attribute_gclk(Net n)
 		return false;
 	}
 
-	Attribute attr = get_first_attribute (inst);
+	Attribute attr = get_instance_first_attribute (inst);
 	while (attr.id != 0) {
 		if (get_attribute_name(attr).id == nameid_gclk.id)
 			return true;
@@ -639,6 +677,7 @@ static void import_module(RTLIL::Design *design, GhdlSynth::Module m)
 				to_str(get_input_name(m, idx)),
 				get_input_width(m, idx));
 			wire->port_input = true;
+                        add_attributes_chain(*wire, get_input_port_first_attribute(m, idx));
 		}
 		Port_Idx nbr_outputs = get_nbr_outputs(m);
 		for (Port_Idx idx = 0; idx < nbr_outputs; idx++) {
@@ -648,7 +687,8 @@ static void import_module(RTLIL::Design *design, GhdlSynth::Module m)
 			if (get_inout_flag(m, idx))
 				wire->port_input = true;
 			wire->port_output = true;
-		}
+                        add_attributes_chain(*wire, get_output_port_first_attribute(m, idx));
+                }
 		Param_Idx nbr_params = get_nbr_params(m);
 		for (Param_Idx idx = 0; idx < nbr_params; idx++) {
 			module->avail_parameters(to_str(get_param_name(m, idx)));
@@ -670,6 +710,7 @@ static void import_module(RTLIL::Design *design, GhdlSynth::Module m)
 		wire->port_input = true;
 		wire->width = get_width(port);
 		set_src(net_map, port, wire);
+                add_attributes_chain(*wire, get_input_port_first_attribute(m, idx));
 	}
 	//  Create inout ports, so that they can be read.
 	Port_Idx nbr_outputs = get_nbr_outputs(m);
@@ -686,6 +727,7 @@ static void import_module(RTLIL::Design *design, GhdlSynth::Module m)
 		wire->port_output = true;
 		wire->port_input = true;
 		wire->width = get_width(output_out);
+                add_attributes_chain(*wire, get_output_port_first_attribute(m, idx));
 
 		Instance inout_inst = get_net_parent(output_out);
 		Net inout_rd = get_output(inout_inst, 0);
@@ -756,14 +798,30 @@ static void import_module(RTLIL::Design *design, GhdlSynth::Module m)
 		case Id_User_Parameters:
 			for (Port_Idx idx = 0; idx < get_nbr_outputs(im); idx++) {
 				Net o = get_output(inst, idx);
-				//  The wire may have been created for an output
-				if (!is_set(net_map, o)) {
-					RTLIL::Wire *wire =
-						module->addWire(NEW_ID, get_width(o));
-					set_src(net_map, o, wire);
-				}
+				//  The wire may have been created for a module output
+				if (is_set(net_map, o))
+					continue;
+				RTLIL::Wire *wire =
+					module->addWire(NEW_ID, get_width(o));
+				set_src(net_map, o, wire);
 			}
 			break;
+		case Id_Signal:
+		case Id_Isignal: {
+		        Net s = get_output(inst, 0);
+
+			//  The wire may have been created for a module output
+			if (is_set(net_map, s))
+				break;
+			Sname iname = get_instance_name(inst);
+			RTLIL::Wire *wire =
+				module->addWire(to_str(iname), get_width(s));
+			set_src(net_map, s, wire);
+
+			//  Attributes
+			add_attributes_from_instance(*wire, inst);
+			break;
+		}
 		case Id_Output:
 		case Id_Inout:
 		case Id_Iinout:
@@ -779,9 +837,6 @@ static void import_module(RTLIL::Design *design, GhdlSynth::Module m)
 		case Id_Memory_Init:
 		case Id_Mem_Wr_Sync:
 			//  Handled by import_memory.
-			break;
-		case Id_Signal:
-		case Id_Isignal:
 			break;
 		case Id_Port:
 		case Id_Const_UB32:
@@ -812,38 +867,6 @@ static void import_module(RTLIL::Design *design, GhdlSynth::Module m)
 			              to_str(get_instance_name(inst)).c_str(),
 			              to_str(get_module_name(get_module(inst))).c_str());
 			return;
-		}
-	}
-
-	//  Add attributes and names on wires.
-	for (Instance inst = get_first_instance(m);
-	     is_valid(inst);
-	     inst = get_next_instance(inst)) {
-		GhdlSynth::Module im = get_module(inst);
-		Module_Id id = get_id(im);
-		switch (id) {
-		case Id_Signal:
-		case Id_Isignal:
-		{
-			Net s = get_input_net(inst, 0);
-			RTLIL::Wire *w;
-			//  The wire may have been created for an output
-			if (!is_set(net_map, s))
-				break;
-			w = net_map.at(s.id);
-
-			 /* Do not rename ports.  */
-			if (w && !w->port_input && !w->port_output) {
-				Sname iname = get_instance_name(inst);
-				module->rename(w, to_str(iname));
-			}
-
-			//  Attributes
-			add_attributes(*w, inst);
-			break;
-		}
-		default:
-			break;
 		}
 	}
 
@@ -1027,7 +1050,7 @@ static void import_module(RTLIL::Design *design, GhdlSynth::Module m)
 					module->addDff(to_str(iname), sig_clk, IN(1), OUT(0), extract_clk_pol(edge_clk) == RTLIL::State::S1);
 				//  For idff, the initial value is set on the output wire.
 				if (id == Id_Idff) {
-					net_map[get_output(inst, 0).id]->attributes["\\init"] = IN(2).as_const();
+					net_map[get_output(inst, 0).id]->attributes[ID::init] = IN(2).as_const();
 				}
 			}
 			break;
@@ -1062,7 +1085,7 @@ static void import_module(RTLIL::Design *design, GhdlSynth::Module m)
 				//  For iadff, the initial value is set on the output
 				//  wire.
 				if (id == Id_Iadff) {
-					net_map[get_output(inst, 0).id]->attributes["\\init"] = IN(4).as_const();
+					net_map[get_output(inst, 0).id]->attributes[ID::init] = IN(4).as_const();
 				}
 			}
 			break;
@@ -1094,6 +1117,7 @@ static void import_module(RTLIL::Design *design, GhdlSynth::Module m)
 			break;
 		case Id_Signal:
 		case Id_Isignal:
+			module->connect(OUT (0), IN (0));
 			break;
 		case Id_Output:
 		case Id_Port:
@@ -1189,13 +1213,14 @@ static void import_module(RTLIL::Design *design, GhdlSynth::Module m)
 		wire->port_id = nbr_inputs + idx + 1;
 		wire->port_output = true;
 		wire->width = get_width(output_out);
+                add_attributes_chain(*wire, get_output_port_first_attribute(m, idx));
 
 		module->connect(wire, get_src(net_map, output_out));
 
 		Instance inst = get_net_parent(output_out);
 		switch(get_id(inst)) {
 		case Id_Output:
-			add_attributes(*wire, inst);
+			add_attributes_from_instance(*wire, inst);
 			break;
 		default:
 			break;
@@ -1276,6 +1301,11 @@ struct GhdlPass : public Pass {
 
 		if (args.size() == 2 && args[1] == "--disp-config") {
 			ghdlcomp__disp_config();
+			log("yosys plugin compiled on " __DATE__ " " __TIME__
+#ifdef GHDL_VER_HASH
+			    ", git hash:" GHDL_VER_HASH
+#endif
+			    "\n");
 		}
 		else {
 			int cmd_argc = args.size() - 1;
