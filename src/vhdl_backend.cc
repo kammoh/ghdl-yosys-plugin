@@ -59,6 +59,16 @@ inline std::string NEXT_INDENT(const std::string &indent) { return indent + "  "
     std::string __prev_indent__ = indent;                                                          \
     std::string indent = NEXT_INDENT(__prev_indent__);
 
+enum VhdlType : unsigned char {
+    VHDL_UNKNOWN = 0,
+    VHDL_BIT = 1,
+    VHDL_VECTOR = 2,
+    VHDL_NUMERIC = 4,
+};
+
+// TODO map for type of external instance (e.g. FPGA lib) generics
+auto inst_generic_types = std::map<std::pair<std::string, std::string>, VhdlType>();
+
 // ASCII control character mapping
 const char *const ctrl_char_array[] = { "NUL", "SOH", "STX", "ETX", "EOT", "ENQ", "ACK", "BEL",
     "BS", "HT", "LF", "VT", "FF", "CR", "SO", "SI", "DLE", "DC1", "DC2", "DC3", "DC4", "NAK", "SYN",
@@ -278,148 +288,68 @@ bool is_reg_wire(RTLIL::SigSpec sig, std::string &reg_name)
     return true;
 }
 
-void dump_const(std::ostream &f, const RTLIL::Const &data, int width = -1, int offset = 0,
-    bool no_decimal = false)
+// convert Const::bits to a vector of char representations
+inline std::vector<char> bits_to_binary(const RTLIL::Const &data)
+{
+    std::vector<char> bin_digits;
+    for (auto bit : data.bits) {
+        switch (bit) {
+        case State::S0:
+            bin_digits.push_back('0');
+            break;
+        case State::S1:
+            bin_digits.push_back('1');
+            break;
+        case RTLIL::Sx:
+            bin_digits.push_back('X');
+            break;
+        case RTLIL::Sz:
+            bin_digits.push_back('Z');
+            break;
+        case RTLIL::Sa:
+            bin_digits.push_back('-');
+            break;
+        case RTLIL::Sm:
+            log_error("Found marker state in final netlist.");
+        }
+    }
+    return bin_digits;
+}
+
+void dump_const(std::ostream &f, const RTLIL::Const &const_data, int width = -1, int offset = 0,
+    bool no_decimal = false, VhdlType vhdl_type = VhdlType::VHDL_UNKNOWN)
 { // PORTING NEEDS TESTING
-    bool set_signed = (data.flags & RTLIL::CONST_FLAG_SIGNED) != 0;
-    /* TODO: verify correctness
-     * width==0 is a null range, as defined by IEEE 1076-2008 5.2.1
-     * width<0 is ?
-     */
-    if (width < 0)
-        width = data.bits.size() - offset;
     if (width == 0) {
-        f << "(others => '0')";
+        f << "(others => '0')"; // "" ? TODO
         return;
     }
-    if (nostr)
-        goto dump_hex;
-    if ((data.flags & RTLIL::CONST_FLAG_STRING) == 0 || width != (int)data.bits.size()) {
-        if (width == 32 && !no_decimal && !nodec) {
-            int32_t val = 0;
-            for (int i = offset + width - 1; i >= offset; i--) {
-                log_assert(i < (int)data.bits.size());
-                if (data.bits[i] != State::S0 && data.bits[i] != State::S1)
-                    goto dump_hex;
-                if (data.bits[i] == State::S1)
-                    val |= 1 << (i - offset);
-            }
-            if (set_signed)
-                f << stringf("std_logic_vector(to_signed(%d,%d))", val, width);
-            else
-                f << stringf("std_logic_vector(to_unsigned(%d,%d))", val, width);
+
+    RTLIL::Const data = const_data;
+
+    if (vhdl_type == VhdlType::VHDL_UNKNOWN) {
+        if ((data.flags == RTLIL::CONST_FLAG_NONE) && (width == 1)) {
+            vhdl_type = VhdlType::VHDL_BIT; // ????
         }
-        else {
-        dump_hex:
-            if (nohex)
-                goto dump_bin;
-            vector<char> bin_digits, hex_digits;
-            for (int i = offset; i < offset + width; i++) {
-                log_assert(i < (int)data.bits.size());
-                switch (data.bits[i]) {
-                case State::S0:
-                    bin_digits.push_back('0');
-                    break;
-                case State::S1:
-                    bin_digits.push_back('1');
-                    break;
-                case RTLIL::Sx:
-                    bin_digits.push_back('X');
-                    break;
-                case RTLIL::Sz:
-                    bin_digits.push_back('Z');
-                    break;
-                case RTLIL::Sa:
-                    bin_digits.push_back('-');
-                    break;
-                case RTLIL::Sm:
-                    log_error("Found marker state in final netlist.");
-                }
-            }
-            if (GetSize(bin_digits) <= 1)
-                goto dump_bin;
-            bool not_clean_hex = GetSize(bin_digits) % 4 != 0;
-            // TODO: double-check VHDL-93 language standard
-            if (not_clean_hex && !std08) {
-                goto dump_bin;
-            }
-            while (GetSize(bin_digits) % 4 != 0)
-                bin_digits.push_back('0');
-            for (int i = 0; i < GetSize(bin_digits); i += 4) {
-                char bit_3 = bin_digits[i + 3];
-                char bit_2 = bin_digits[i + 2];
-                char bit_1 = bin_digits[i + 1];
-                char bit_0 = bin_digits[i + 0];
-                if (bit_3 == 'X' || bit_2 == 'X' || bit_1 == 'X' || bit_0 == 'X') {
-                    if (bit_3 != 'X' || bit_2 != 'X' || bit_1 != 'X' || bit_0 != 'X')
-                        goto dump_bin;
-                    hex_digits.push_back('X');
-                    continue;
-                }
-                if (bit_3 == 'Z' || bit_2 == 'Z' || bit_1 == 'Z' || bit_0 == 'Z') {
-                    if (bit_3 != 'Z' || bit_2 != 'Z' || bit_1 != 'Z' || bit_0 != 'Z')
-                        goto dump_bin;
-                    hex_digits.push_back('Z');
-                    continue;
-                }
-                if (bit_3 == '-' || bit_2 == '-' || bit_1 == '-' || bit_0 == '-') {
-                    if (bit_3 != '-' || bit_2 != '-' || bit_1 != '-' || bit_0 != '-')
-                        goto dump_bin;
-                    hex_digits.push_back('-');
-                    continue;
-                }
-                int val = 8 * (bit_3 - '0') + 4 * (bit_2 - '0') + 2 * (bit_1 - '0') + (bit_0 - '0');
-                hex_digits.push_back(val < 10 ? '0' + val : 'a' + val - 10);
-            }
-            if (not_clean_hex) {
-                f << stringf("%d", width);
-            }
-            f << stringf("x\"");
-            for (int i = GetSize(hex_digits) - 1; i >= 0; i--)
-                f << hex_digits[i];
-            f << stringf("\"");
-        }
-        if (0) {
-        dump_bin:
-            if (width > 1) {
-                f << stringf("\"");
-            }
-            else {
-                f << stringf("'");
-            }
-            for (int i = offset + width - 1; i >= offset; i--) {
-                log_assert(i < (int)data.bits.size());
-                switch (data.bits[i]) {
-                case State::S0:
-                    f << stringf("0");
-                    break;
-                case State::S1:
-                    f << stringf("1");
-                    break;
-                case RTLIL::Sx:
-                    f << stringf("X");
-                    break;
-                case RTLIL::Sz:
-                    f << stringf("Z");
-                    break;
-                case RTLIL::Sa:
-                    f << stringf("-");
-                    break;
-                case RTLIL::Sm:
-                    log_error("Found marker state in final netlist.");
-                }
-            }
-            if (width > 1) {
-                f << stringf("\"");
-            }
-            else {
-                f << stringf("'");
-            }
+        else if (!no_decimal && !nodec && (data.size() == 32) && (width == -1)) {
+            vhdl_type = VhdlType::VHDL_NUMERIC;
         }
     }
-    else {
-        if ((data.flags & RTLIL::CONST_FLAG_REAL) == 0)
-            f << stringf("\"");
+    //  width=-1 -> infer width from data.size
+    if (width == -1) {
+        width = data.size() - offset;
+    }
+
+    if (offset > 0 || width != data.size()) {
+        data = data.extract(offset, width); // 0 pads if width > size
+    }
+
+    if (data.flags & RTLIL::CONST_FLAG_REAL) {
+        log_error("unhandled CONST_FLAG_REAL");
+        return;
+    }
+
+    if (data.flags & RTLIL::CONST_FLAG_STRING) {
+        f << stringf("\"");
         std::string str = data.decode_string();
         for (size_t i = 0; i < str.size(); i++) {
             unsigned char current_char_unsigned = (unsigned char)str[i];
@@ -438,8 +368,73 @@ void dump_const(std::ostream &f, const RTLIL::Const &data, int width = -1, int o
             else
                 f << str[i];
         }
-        if ((data.flags & RTLIL::CONST_FLAG_REAL) == 0)
-            f << stringf("\"");
+        f << stringf("\"");
+        return;
+    }
+
+    if (vhdl_type == VhdlType::VHDL_NUMERIC) {
+        f << data.as_int(data.flags & RTLIL::CONST_FLAG_SIGNED);
+        return;
+    }
+
+    bool dump_bin = nohex;
+
+    std::vector<char> hex_digits;
+    std::vector<char> bin_digits = bits_to_binary(data);
+    if (vhdl_type == VhdlType::VHDL_BIT) {
+        log_assert(GetSize(bin_digits) == 1);
+        f << "'" << bin_digits[0] << "'";
+        return;
+    }
+    int leftovers = bin_digits.size() % 4;
+    if (std08) { // extend with zeros and add width prefix
+        for (int i = 0; i < leftovers; i++) {
+            bin_digits.push_back('0');
+        }
+        leftovers = 0;
+    }
+
+    for (int i = 0; !dump_bin && (i < GetSize(bin_digits) - leftovers); i += 4) {
+        char bit_3 = bin_digits[i + 3];
+        char bit_2 = bin_digits[i + 2];
+        char bit_1 = bin_digits[i + 1];
+        char bit_0 = bin_digits[i + 0];
+        if (bit_3 == 'X' || bit_2 == 'X' || bit_1 == 'X' || bit_0 == 'X') {
+            if (bit_3 != 'X' || bit_2 != 'X' || bit_1 != 'X' || bit_0 != 'X')
+                dump_bin = true;
+            hex_digits.push_back('X');
+            continue;
+        }
+        if (bit_3 == 'Z' || bit_2 == 'Z' || bit_1 == 'Z' || bit_0 == 'Z') {
+            if (bit_3 != 'Z' || bit_2 != 'Z' || bit_1 != 'Z' || bit_0 != 'Z')
+                dump_bin = true;
+            hex_digits.push_back('Z');
+            continue;
+        }
+        if (bit_3 == '-' || bit_2 == '-' || bit_1 == '-' || bit_0 == '-') {
+            if (bit_3 != '-' || bit_2 != '-' || bit_1 != '-' || bit_0 != '-')
+                dump_bin = true;
+            hex_digits.push_back('-');
+            continue;
+        }
+        int val = 8 * (bit_3 - '0') + 4 * (bit_2 - '0') + 2 * (bit_1 - '0') + (bit_0 - '0');
+        hex_digits.push_back(val < 10 ? '0' + val : 'a' + val - 10);
+    }
+
+    if (dump_bin || hex_digits.size() == 0) {
+        f << "\"" << std::string(bin_digits.rbegin(), bin_digits.rend()) << "\"";
+        return;
+    }
+    if (std08) { // extend with zeros and add width prefix
+        f << data.bits.size();
+    }
+    else if (leftovers) {
+        f << "(";
+        f << "\"" << std::string(bin_digits.rbegin(), bin_digits.rbegin() + leftovers) << "\" & ";
+    }
+    f << "x\"" << std::string(hex_digits.rbegin(), hex_digits.rend()) << "\"";
+    if (leftovers) {
+        f << ")";
     }
 }
 
@@ -2039,16 +2034,34 @@ void dump_cell(std::ostream &f, std::string indent, RTLIL::Cell *cell)
     if (cell_name != id(cell->name)) {
         f << " -- " << id(cell->name) << "\n";
     }
-
     f << "\n";
+
+    if (unisim) { // TODO ???
+        inst_generic_types[std::make_pair("FDSE", "INIT")] = VhdlType::VHDL_BIT;
+        inst_generic_types[std::make_pair("FDRE", "INIT")] = VhdlType::VHDL_BIT;
+    }
+
     if (cell->parameters.size() > 0) {
         f << indent << "generic map(\n";
         for (auto it = cell->parameters.begin(); it != cell->parameters.end(); ++it) {
             if (it != cell->parameters.begin()) {
-                f << stringf(",\n");
+                f << ",\n";
             }
-            f << NEXT_INDENT(indent) << id(it->first).c_str() << " => ";
-            dump_const(f, it->second, -1, 0, true);
+            auto param_name = id(it->first);
+            f << NEXT_INDENT(indent) << param_name << " => ";
+            // FIXME how could we possibily know the type? std_logic? bit_vector? int? boolean? Is
+            // this an unfixable YOSYS limitation?
+            // workaround: user provided mapping file
+            // for now, let's assume everything is a string or bit_vector
+            auto vhdl_type = VhdlType::VHDL_UNKNOWN;
+            auto entity = id(cell->type, false);
+            auto search = inst_generic_types.find(make_pair(entity, param_name));
+            if (search != inst_generic_types.end()) {
+                vhdl_type = search->second;
+                log_warning("using type %d for %s generic %s\n", vhdl_type, entity.c_str(),
+                    param_name.c_str());
+            }
+            dump_const(f, it->second, -1, 0, vhdl_type != VhdlType::VHDL_NUMERIC, vhdl_type);
         }
         f << "\n" << indent << ")\n";
     }
@@ -2081,25 +2094,7 @@ void dump_cell(std::ostream &f, std::string indent, RTLIL::Cell *cell)
             f << stringf(",\n");
         first_arg = false;
         f << NEXT_INDENT(indent) << id(it->first) << " => ";
-
-        SigSpec other = it->second;
-
-        // auto port = cell->getPort(it->first);
-
-        if (cell->output(it->first) && other.size() > 1) {
-
-            // f << " -- xx sz " << other.size() << " \n";
-            // not chunk not bit not wire!
-
-            for (auto it = other.chunks().rbegin(); it != other.chunks().rend(); ++it) {
-                if (it != other.chunks().rbegin())
-                    f << "  &  ";
-                dump_sigchunk(f, *it, true);
-            }
-        }
-        else {
-            dump_sigspec(f, it->second, false);
-        }
+        dump_sigspec(f, it->second, false);
     }
     f << "\n" << indent << ");\n";
 
@@ -2429,15 +2424,24 @@ void dump_module(std::ostream &f, std::string indent, RTLIL::Module *module)
     // Architecture
     f << indent << stringf("architecture rtl of %s is\n", id(module->name, false).c_str());
 
-    // find submodules output port connections
+    // submodules output ports should connect to temporary wires
     for (auto cell : module->cells()) {
         if (!is_internal_cell(cell->type)) {
             for (auto it = cell->connections().begin(); it != cell->connections().end(); ++it) {
-                if (cell->output(it->first) && it->second.size() > 1 &&
-                    it->second.chunks().size() > 1) {
-                    auto new_wire = module->addWire(NEW_ID, it->second.size());
-                    module->connect(it->second, new_wire);
-                    cell->setPort(it->first, new_wire);
+                if (it->second.size() > 1 &&
+                    it->second.chunks().size() > 1) { // TODO only check chunks?
+                    if (cell->output(it->first)) {
+                        auto new_wire = module->addWire(NEW_ID, it->second.size());
+                        module->connect(it->second, new_wire);
+                        cell->setPort(it->first, new_wire);
+                        reset_auto_counter_id(new_wire->name, true);
+                    }
+                    else if (!std08 && cell->input(it->first)) { // TODO verify
+                        auto new_wire = module->addWire(NEW_ID, it->second.size());
+                        module->connect(new_wire, it->second);
+                        cell->setPort(it->first, new_wire);
+                        reset_auto_counter_id(new_wire->name, true);
+                    }
                 }
             }
         }
