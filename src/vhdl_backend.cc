@@ -2102,7 +2102,7 @@ void dump_cell(std::ostream &f, std::string indent, RTLIL::Cell *cell)
         !cell->type.in(ID($ff), ID($_FF_))) {
         std::stringstream ss;
         dump_reg_init(ss, cell->getPort(ID::Q));
-        if (!ss.str().empty()) {
+        if (!ss.str().empty()) { // FIXME
             f << stringf("%sinitial %s.Q", indent.c_str(), cell_name.c_str());
             f << ss.str();
             f << ";\n";
@@ -2143,7 +2143,7 @@ void dump_proc_switch(std::ostream &f, std::string indent, RTLIL::SwitchRule *sw
 
 void dump_case_body(
     std::ostream &f, std::string indent, RTLIL::CaseRule *cs, bool omit_trailing_begin = false)
-{ // PORTING REQUIRED
+{ // PORTING REQUIRED FIXME
     int number_of_stmts = cs->switches.size() + cs->actions.size();
 
     if (!omit_trailing_begin && number_of_stmts >= 2)
@@ -2168,59 +2168,50 @@ void dump_case_body(
         f << stringf("%s  /* empty */;\n", indent.c_str());
 
     if (omit_trailing_begin || number_of_stmts >= 2)
-        f << stringf("%s"
-                     "end\n",
-            indent.c_str());
+        f <<indent << "end\n";
 }
 
 void dump_proc_switch(std::ostream &f, std::string indent, RTLIL::SwitchRule *sw)
 { // PORTING REQUIRED
     if (sw->signal.size() == 0) {
-        f << stringf("%s"
-                     "begin\n",
-            indent.c_str());
+        f << indent << "begin\n";
         for (auto it = sw->cases.begin(); it != sw->cases.end(); ++it) {
             if ((*it)->compare.size() == 0)
                 dump_case_body(f, NEXT_INDENT(indent), *it);
         }
-        f << stringf("%s"
-                     "end\n",
-            indent.c_str());
+        f << indent << "end\n";
         return;
     }
 
     dump_attributes(f, indent, sw->attributes);
-    f << stringf("%s"
-                 "casez (",
-        indent.c_str());
+    f << indent << "casez (";
     dump_sigspec(f, sw->signal);
     f << stringf(")\n");
-
-    bool got_default = false;
-    for (auto it = sw->cases.begin(); it != sw->cases.end(); ++it) {
-        dump_attributes(f, NEXT_INDENT(indent), (*it)->attributes, /*modattr=*/false,
-            /*regattr=*/false, /*as_comment=*/true);
-        if ((*it)->compare.size() == 0) {
-            if (got_default)
-                continue;
-            f << stringf("%s  default", indent.c_str());
-            got_default = true;
-        }
-        else {
-            f << stringf("%s  ", indent.c_str());
-            for (size_t i = 0; i < (*it)->compare.size(); i++) {
-                if (i > 0)
-                    f << stringf(", ");
-                dump_sigspec(f, (*it)->compare[i]);
+    {
+        INDENT
+        bool got_default = false;
+        for (auto it = sw->cases.begin(); it != sw->cases.end(); ++it) {
+            dump_attributes(f, NEXT_INDENT(indent), (*it)->attributes, /*modattr=*/false,
+                /*regattr=*/false, /*as_comment=*/true);
+            if ((*it)->compare.size() == 0) {
+                if (got_default)
+                    continue;
+                f << indent << "default";
+                got_default = true;
             }
+            else {
+                f << indent;
+                for (size_t i = 0; i < (*it)->compare.size(); i++) {
+                    if (i > 0)
+                        f << stringf(", ");
+                    dump_sigspec(f, (*it)->compare[i]);
+                }
+            }
+            f << ":\n";
+            dump_case_body(f, NEXT_INDENT(indent), *it);
         }
-        f << stringf(":\n");
-        dump_case_body(f, indent + "    ", *it);
     }
-
-    f << stringf("%s"
-                 "endcase\n",
-        indent.c_str());
+    f << indent << "endcase\n";
 }
 
 void case_body_find_regs(RTLIL::CaseRule *cs)
@@ -2260,7 +2251,6 @@ void dump_process(std::ostream &f, std::string indent, RTLIL::Process *proc)
     for (size_t i = 0; i < proc->syncs.size(); i++) {
         RTLIL::SyncRule *sync = proc->syncs[i];
         indent = backup_indent;
-        // FIXME VHDL
         if (sync->type == RTLIL::STa) {
             f << stringf("%s"
                          "always @* begin\n",
