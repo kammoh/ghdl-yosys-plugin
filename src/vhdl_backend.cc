@@ -171,17 +171,20 @@ std::string next_auto_id()
 
 std::string id(RTLIL::IdString internal_id, bool may_rename = true)
 { // PORTING NEEDS TESTING
-    const char *str = internal_id.c_str();
+    // VHDL is case insensitive.
+    // Keep all internal names lower-case ??? TODO
+    // Note: Keywords list is lower-case, latin characters only.
+    std::string str = internal_id.str();
     bool do_escape = false;
 
     if (may_rename && auto_name_map.count(internal_id) != 0)
         return stringf("%s%0*d", auto_prefix.c_str(), auto_name_digits,
             auto_name_offset + auto_name_map[internal_id]);
 
-    if (*str == '\\')
-        str++;
+    if (str[0] == '\\')
+        str.erase(0, 1);
 
-    if ('0' <= *str && *str <= '9')
+    if (!::isalpha(str[0])) // valid VHDL identifier should start with a letter
         do_escape = true;
 
     for (int i = 0; str[i]; i++) {
@@ -189,8 +192,12 @@ std::string id(RTLIL::IdString internal_id, bool may_rename = true)
             continue;
         if ('a' <= str[i] && str[i] <= 'z')
             continue;
-        if ('A' <= str[i] && str[i] <= 'Z')
+        if ('A' <= str[i] && str[i] <= 'Z') {
+            // VHDL is case-insensitive
+            // convert everything to lower-case to avoid name confusions
+            str[i] = ::tolower(str[i]);
             continue;
+        }
         if (str[i] == '_')
             continue;
         do_escape = true;
@@ -220,19 +227,20 @@ std::string id(RTLIL::IdString internal_id, bool may_rename = true)
         "assert", "assume", "assume_guarantee", "cover", "default", "fairness", "property",
         "restrict", "restrict_guarantee", "sequence", "strong", "vmode", "vprop", "vunit"
     };
+
     if (vhdl_keywords.count(str) || psl_keywords.count(str))
         do_escape = true;
     // TODO: check for numbers afterwards, but regex is overkill here
     // array_type_(width) is used by the memory dump pass
-    if (strncmp(str, "array_type_", strlen("array_type_")) == 0)
+    if (str.rfind("array_type_", 0) == 0)
         do_escape = true;
-    if (strncmp(str, "ivar_", strlen("ivar_")) == 0)
+    if (str.rfind("ivar_", 0) == 0)
         do_escape = true;
 
     if (do_escape)
         // VHDL extended identifier
-        return "\\" + std::string(str) + "\\";
-    return std::string(str);
+        return "\\" + str + "\\";
+    return str;
 }
 
 void dump_sigchunk(std::ostream &f, const RTLIL::SigChunk &chunk, bool no_decimal = false);
@@ -400,22 +408,25 @@ void dump_const(std::ostream &f, const RTLIL::Const &const_data, int width = -1,
         char bit_1 = bin_digits[i + 1];
         char bit_0 = bin_digits[i + 0];
         if (bit_3 == 'X' || bit_2 == 'X' || bit_1 == 'X' || bit_0 == 'X') {
-            if (bit_3 != 'X' || bit_2 != 'X' || bit_1 != 'X' || bit_0 != 'X')
-                dump_bin = true;
-            hex_digits.push_back('X');
-            continue;
+            // if (bit_3 != 'X' || bit_2 != 'X' || bit_1 != 'X' || bit_0 != 'X')
+            dump_bin = true;
+            // hex_digits.push_back('X');
+            // continue;
+            break;
         }
         if (bit_3 == 'Z' || bit_2 == 'Z' || bit_1 == 'Z' || bit_0 == 'Z') {
-            if (bit_3 != 'Z' || bit_2 != 'Z' || bit_1 != 'Z' || bit_0 != 'Z')
-                dump_bin = true;
-            hex_digits.push_back('Z');
-            continue;
+            // if (bit_3 != 'Z' || bit_2 != 'Z' || bit_1 != 'Z' || bit_0 != 'Z')
+            dump_bin = true;
+            // hex_digits.push_back('Z');
+            // continue;
+            break;
         }
         if (bit_3 == '-' || bit_2 == '-' || bit_1 == '-' || bit_0 == '-') {
-            if (bit_3 != '-' || bit_2 != '-' || bit_1 != '-' || bit_0 != '-')
-                dump_bin = true;
-            hex_digits.push_back('-');
-            continue;
+            // if (bit_3 != '-' || bit_2 != '-' || bit_1 != '-' || bit_0 != '-')
+            dump_bin = true;
+            // hex_digits.push_back('-');
+            // continue;
+            break;
         }
         int val = 8 * (bit_3 - '0') + 4 * (bit_2 - '0') + 2 * (bit_1 - '0') + (bit_0 - '0');
         hex_digits.push_back(val < 10 ? '0' + val : 'a' + val - 10);
@@ -490,6 +501,23 @@ void dump_sigchunk(std::ostream &f, const RTLIL::SigChunk &chunk, bool no_decima
     }
 }
 
+std::string sigspec_string(const RTLIL::SigSpec &sig)
+{
+    std::ostringstream f;
+    if (sig.is_chunk()) {
+        dump_sigchunk(f, sig.as_chunk());
+    }
+    else {
+
+        for (auto it = sig.chunks().rbegin(); it != sig.chunks().rend(); ++it) {
+            if (it != sig.chunks().rbegin())
+                f << " & ";
+            dump_sigchunk(f, *it, true);
+        }
+    }
+    return f.str();
+}
+
 void dump_sigspec(std::ostream &f, const RTLIL::SigSpec &sig, bool lhs_mode = false)
 { // PORTING NEEDS TESTING
     if (sig.size() == 0) {
@@ -507,8 +535,8 @@ void dump_sigspec(std::ostream &f, const RTLIL::SigSpec &sig, bool lhs_mode = fa
             // TODO: this is only a warning because other codegen stuff is still
             // generating 2008 syntax outside of VHDL-2008 mode This should be
             // converted into an error once that is fixed
-            log_warning("%s", "dump_sigspec called for multi-chunk LHS output when "
-                              "not in VHDL-2008 mode\n");
+            log_error("%s", "dump_sigspec called for multi-chunk LHS output when "
+                            "not in VHDL-2008 mode\n");
         }
         if (lhs_mode) {
             f << "(";
@@ -736,8 +764,8 @@ void dump_memory(std::ostream &f, std::string indent, Mem &mem)
             {
                 std::ostringstream os;
                 dump_sigspec(os, port.clk);
-                clk_domain_str =
-                    stringf("%sedge %s", port.clk_polarity ? "pos" : "neg", os.str().c_str());
+                clk_domain_str = stringf(
+                    "%sedge(%s)", port.clk_polarity ? "rising_" : "falling", os.str().c_str());
                 if (clk_to_lof_body.count(clk_domain_str) == 0)
                     clk_to_lof_body[clk_domain_str] = std::vector<std::string>();
             }
@@ -821,7 +849,7 @@ void dump_memory(std::ostream &f, std::string indent, Mem &mem)
             std::ostringstream os;
             dump_sigspec(os, port.clk);
             clk_domain_str =
-                stringf("%sedge %s", port.clk_polarity ? "pos" : "neg", os.str().c_str());
+                stringf("%sing_edge(%s)", port.clk_polarity ? "ris" : "fall", os.str().c_str());
             if (clk_to_lof_body.count(clk_domain_str) == 0)
                 clk_to_lof_body[clk_domain_str] = std::vector<std::string>();
         }
@@ -877,32 +905,23 @@ void dump_memory(std::ostream &f, std::string indent, Mem &mem)
 
     // the reg ... definitions
     for (auto &reg : lof_reg_declarations) {
-        f << stringf("%s"
-                     "%s",
-            indent.c_str(), reg.c_str());
+        f << indent << reg;
     }
     // the block of expressions by clock domain
     for (auto &pair : clk_to_lof_body) {
         std::string clk_domain = pair.first;
         std::vector<std::string> lof_lines = pair.second;
         if (clk_domain != "") {
-            f << stringf("%s"
-                         "always @(%s) begin\n",
-                indent.c_str(), clk_domain.c_str());
+            f << indent << "process(" << clk_domain << ")\n";
+            f << indent << "begin\n";
             for (auto &line : lof_lines)
-                f << stringf("%s%s"
-                             "%s",
-                    indent.c_str(), indent.c_str(), line.c_str());
-            f << stringf("%s"
-                         "end\n",
-                indent.c_str());
+                f << NEXT_INDENT(indent) << line;
+            f << indent << "end process;\n";
         }
         else {
             // the non-clocked assignments
             for (auto &line : lof_lines)
-                f << stringf("%s"
-                             "%s",
-                    indent.c_str(), line.c_str());
+                f << indent << line;
         }
     }
 }
@@ -1037,20 +1056,20 @@ void dump_cell_expr_binop(std::ostream &f, std::string indent, RTLIL::Cell *cell
 
 bool dump_cell_expr(std::ostream &f, std::string indent, RTLIL::Cell *cell)
 { // PORTING IN PROGRESS
-    f << stringf("-- Cell type is %s\n", cell->type.c_str());
     if (cell->type == ID($_NOT_)) {
+        dump_attributes(f, "", cell->attributes, ' ');
         f << indent;
         dump_sigspec(f, cell->getPort(ID::Y), true);
         f << stringf(" <= ");
         f << stringf("not ");
-        dump_attributes(f, "", cell->attributes, ' ');
         dump_cell_expr_port(f, cell, "A", false);
-        f << ";\n";
+        f << ";";
         return true;
     }
 
     if (cell->type.in(ID($_AND_), ID($_NAND_), ID($_OR_), ID($_NOR_), ID($_XOR_), ID($_XNOR_),
             ID($_ANDNOT_), ID($_ORNOT_))) {
+        dump_attributes(f, "", cell->attributes, ' ');
         f << indent;
         dump_sigspec(f, cell->getPort(ID::Y), true);
         f << stringf(" <= ");
@@ -1064,7 +1083,6 @@ bool dump_cell_expr(std::ostream &f, std::string indent, RTLIL::Cell *cell)
             f << stringf("or");
         if (cell->type.in(ID($_XOR_), ID($_XNOR_)))
             f << stringf("xor");
-        dump_attributes(f, "", cell->attributes, ' ');
         f << stringf(" ");
         if (cell->type.in(ID($_ANDNOT_), ID($_ORNOT_)))
             f << stringf("not (");
@@ -1108,6 +1126,7 @@ bool dump_cell_expr(std::ostream &f, std::string indent, RTLIL::Cell *cell)
     }
 
     if (cell->type.in(ID($_AOI3_), ID($_OAI3_))) {
+        dump_attributes(f, "", cell->attributes, ' ');
         f << indent;
         dump_sigspec(f, cell->getPort(ID::Y), true);
         f << stringf(" <= not ((");
@@ -1115,7 +1134,6 @@ bool dump_cell_expr(std::ostream &f, std::string indent, RTLIL::Cell *cell)
         f << stringf(cell->type == ID($_AOI3_) ? " and " : " or ");
         dump_cell_expr_port(f, cell, "B", false);
         f << stringf(cell->type == ID($_AOI3_) ? ") or" : ") and");
-        dump_attributes(f, "", cell->attributes, ' ');
         f << stringf(" ");
         dump_cell_expr_port(f, cell, "C", false);
         f << stringf(");\n");
@@ -1123,6 +1141,8 @@ bool dump_cell_expr(std::ostream &f, std::string indent, RTLIL::Cell *cell)
     }
 
     if (cell->type.in(ID($_AOI4_), ID($_OAI4_))) {
+        dump_attributes(f, "", cell->attributes, ' ');
+        dump_cell_expr_port(f, cell, "D", false);
         f << indent;
         dump_sigspec(f, cell->getPort(ID::Y), true);
         f << stringf(" <= not ((");
@@ -1130,11 +1150,9 @@ bool dump_cell_expr(std::ostream &f, std::string indent, RTLIL::Cell *cell)
         f << stringf(cell->type == ID($_AOI4_) ? " and " : " or ");
         dump_cell_expr_port(f, cell, "B", false);
         f << stringf(cell->type == ID($_AOI4_) ? ") or" : ") and");
-        dump_attributes(f, "", cell->attributes, ' ');
         f << stringf(" (");
         dump_cell_expr_port(f, cell, "C", false);
         f << stringf(cell->type == ID($_AOI4_) ? " and " : " or ");
-        dump_cell_expr_port(f, cell, "D", false);
         f << stringf("));\n");
         return true;
     }
@@ -1170,22 +1188,22 @@ bool dump_cell_expr(std::ostream &f, std::string indent, RTLIL::Cell *cell)
     }
     else {
         if (cell->type == ID($reduce_and)) {
+            dump_attributes(f, "", cell->attributes, ' ');
             f << indent;
             dump_sigspec(f, cell->getPort(ID::Y), true);
             f << stringf(" <= ");
             f << stringf("'1' when ");
-            dump_attributes(f, "", cell->attributes, ' ');
             dump_cell_expr_port(f, cell, "A", false, false);
-            // TODO: is "others" legal here?
+            // FIXME: is "others" NOT ok here
             f << stringf(" = (others => '1') else '0';\n");
             return true;
         }
         if (cell->type.in(ID($reduce_or), ID($reduce_bool))) {
+            dump_attributes(f, "", cell->attributes, ' ');
             f << indent;
             dump_sigspec(f, cell->getPort(ID::Y), true);
             f << stringf(" <= ");
             f << stringf("'0' when ");
-            dump_attributes(f, "", cell->attributes, ' ');
             dump_cell_expr_port(f, cell, "A", false, false);
             // TODO: is "others" legal here?
             f << stringf(" = (others => '0') else '1';\n");
@@ -1793,7 +1811,7 @@ bool dump_cell_expr(std::ostream &f, std::string indent, RTLIL::Cell *cell)
                         f << NEXT_INDENT(indent) << reg_bit_name << assign << "'0';\n";
                         f << indent << "elsif ";
                     }
-                    f << stringf("%s_edge(", ff.pol_clk ? "rising" : "falling");
+                    f << stringf("%sing_edge(", ff.pol_clk ? "ris" : "fall");
                     dump_sigspec(f, ff.sig_clk);
                     f << stringf(") then\n");
                     // ff.ce_over_srst means sync-reset is also gated by enable
@@ -2146,29 +2164,21 @@ void dump_case_body(
 { // PORTING REQUIRED FIXME
     int number_of_stmts = cs->switches.size() + cs->actions.size();
 
-    if (!omit_trailing_begin && number_of_stmts >= 2)
-        f << stringf("%s"
-                     "begin\n",
-            indent.c_str());
-
     for (auto it = cs->actions.begin(); it != cs->actions.end(); ++it) {
         if (it->first.size() == 0)
             continue;
-        f << stringf("%s  ", indent.c_str());
+        f << indent;
         dump_sigspec(f, it->first);
-        f << stringf(" = ");
+        f << stringf(" <= ");
         dump_sigspec(f, it->second);
         f << ";\n";
     }
 
     for (auto it = cs->switches.begin(); it != cs->switches.end(); ++it)
-        dump_proc_switch(f, NEXT_INDENT(indent), *it);
+        dump_proc_switch(f, indent, *it);
 
     if (!omit_trailing_begin && number_of_stmts == 0)
-        f << stringf("%s  /* empty */;\n", indent.c_str());
-
-    if (omit_trailing_begin || number_of_stmts >= 2)
-        f <<indent << "end\n";
+        f << indent << "/* empty */;\n";
 }
 
 void dump_proc_switch(std::ostream &f, std::string indent, RTLIL::SwitchRule *sw)
@@ -2239,72 +2249,136 @@ void find_process_regs(RTLIL::Process *proc)
     }
     return;
 }
+
 void dump_process(std::ostream &f, std::string indent, RTLIL::Process *proc)
 { // PORTING REQUIRED
-    f << stringf("%s"
-                 "always @* begin\n",
-        indent.c_str());
-    dump_case_body(f, indent, &proc->root_case, true);
+    // FIXME
+    bool first = true;
+    f << indent << "process(";
+    for (auto const &sig : proc->root_case.compare) {
+        if (!first) {
+            f << ", ";
+        }
+        if (sig.size() > 0) {
 
-    std::string backup_indent = indent;
+            f << sigspec_string(sig);
+            first = false;
+        }
+    }
+    for (auto const &sig : proc->root_case.actions) {
+        if (!first) {
+            f << ", ";
+        }
+        if (sig.second.size() > 0) {
+            f << sigspec_string(sig.second); // read value
+            first = false;
+        }
+    }
+    f << ")\n";
+    f << indent << "begin\n";
+    dump_case_body(f, NEXT_INDENT(indent), &proc->root_case, true);
+    f << indent << "end process;\n";
+
+    // std::string backup_indent = indent;
 
     for (size_t i = 0; i < proc->syncs.size(); i++) {
         RTLIL::SyncRule *sync = proc->syncs[i];
-        indent = backup_indent;
-        if (sync->type == RTLIL::STa) {
-            f << stringf("%s"
-                         "always @* begin\n",
-                indent.c_str());
+        // indent = backup_indent;
+        auto sync_sig = sigspec_string(sync->signal);
+        f << indent << "process (" << sync_sig << ")\n";
+        f << indent << "begin\n";
+        {
+            INDENT
+            f << indent << "if ";
+            if (sync->type == RTLIL::STp || sync->type == RTLIL::ST1)
+                f << stringf("rising_edge(%s)", sync_sig.c_str());
+            else if (sync->type == RTLIL::STn || sync->type == RTLIL::ST0)
+                f << stringf("falling_edge(%s)", sync_sig.c_str());
+            else if (sync->type == RTLIL::ST0 || sync->type == RTLIL::ST1)
+                f << stringf("%s = '%d'", sync_sig.c_str(),
+                    sync->type == RTLIL::ST0 ? 0 : 1); // level-sensitive?! FIXME
+            f << stringf(" then\n");
+
+            // if (sync->type == RTLIL::STp || sync->type == RTLIL::STn) {
+            //     for (size_t j = 0; j < proc->syncs.size(); j++) {
+            //         RTLIL::SyncRule *sync2 = proc->syncs[j];
+            //         if (sync2->type == RTLIL::ST0 || sync2->type == RTLIL::ST1) {
+            //             f << indent << stringf("if (%s", sync2->type == RTLIL::ST1 ? "!" : "");
+            //             dump_sigspec(f, sync2->signal);
+            //             f << stringf(") then\n");
+            //             ends = indent + "end if;\n" + ends;
+            //             indent += "  ";
+            //         }
+            //     }
+            // }
+            for (auto it = sync->actions.begin(); it != sync->actions.end(); ++it) {
+                if (it->first.size() == 0)
+                    continue;
+                f << NEXT_INDENT(indent) << sigspec_string(it->first)
+                  << " <= " << sigspec_string(it->second) << ";\n";
+            }
+            f << indent << "end if;\n";
         }
-        else if (sync->type == RTLIL::STi) {
-            f << stringf("%s"
-                         "initial begin\n",
-                indent.c_str());
+        f << indent << "end process;\n";
+    }
+}
+
+// Required per entity/package decleration in a file
+void write_header_imports(std::ostream &f, std::string indent)
+{
+    f << indent << "library IEEE;\n";
+    f << indent << "use IEEE.std_logic_1164.ALL;\n";
+    // Could scan for arithmetic-type cells, but this is too cumbersome
+    f << indent << "use IEEE.NUMERIC_STD.ALL;\n";
+    if (extmem) {
+        f << indent << "\nuse STD.TEXTIO.ALL\n";
+    }
+    if (unisim) {
+        f << indent << "\n";
+        f << indent << "library unisim;\n";
+        f << indent << "use unisim.VCOMPONENTS.all;\n";
+        f << indent << "use unisim.VPKG.all;\n";
+    }
+}
+
+void dump_generic_decl(std::ostream &f, const std::string &indent,
+    const std::map<RTLIL::IdString, std::pair<RTLIL::Const, VhdlType>> &generics)
+{
+    f << indent << "generic(\n";
+    f << indent << ");\n";
+}
+
+void dump_port_decl(
+    std::ostream &f, const std::string &indent, const std::map<int, Wire *> &port_wires)
+{
+    f << indent << "port (\n";
+    for (auto wire_it = port_wires.cbegin(); wire_it != port_wires.cend(); wire_it++) {
+        Wire *wire = wire_it->second;
+        f << NEXT_INDENT(indent) << id(wire->name) << " : ";
+        // TODO: Verilog inout = VHDL inout?
+        if (wire->port_input && wire->port_output) {
+            f << stringf(" inout ");
+        }
+        else if (wire->port_input && !wire->port_output) {
+            f << stringf(" in ");
+        }
+        else if (!wire->port_input && wire->port_output) {
+            f << stringf(" out ");
         }
         else {
-            f << indent << "always @(";
-            if (sync->type == RTLIL::STp || sync->type == RTLIL::ST1)
-                f << stringf("posedge ");
-            if (sync->type == RTLIL::STn || sync->type == RTLIL::ST0)
-                f << stringf("negedge ");
-            dump_sigspec(f, sync->signal);
-            f << stringf(") begin\n");
+            // Should never execute
+            log_error("Port %s is neither an input nor an output\n", id(wire->name).c_str());
         }
-        std::string ends = indent + "end\n";
-        indent += "  ";
-
-        if (sync->type == RTLIL::ST0 || sync->type == RTLIL::ST1) {
-            f << indent << stringf("if (%s", sync->type == RTLIL::ST0 ? "!" : "");
-            dump_sigspec(f, sync->signal);
-            f << stringf(") begin\n");
-            ends = indent + "end\n" + ends;
-            indent += "  ";
+        // TODO: verify arithmetic
+        f << wire_typestr(wire);
+        auto wire_it_next = std::next(wire_it);
+        if (wire_it_next != port_wires.cend()) {
+            f << stringf(";");
         }
-
-        if (sync->type == RTLIL::STp || sync->type == RTLIL::STn) {
-            for (size_t j = 0; j < proc->syncs.size(); j++) {
-                RTLIL::SyncRule *sync2 = proc->syncs[j];
-                if (sync2->type == RTLIL::ST0 || sync2->type == RTLIL::ST1) {
-                    f << indent << stringf("if (%s", sync2->type == RTLIL::ST1 ? "!" : "");
-                    dump_sigspec(f, sync2->signal);
-                    f << stringf(") begin\n");
-                    ends = indent + "end\n" + ends;
-                    indent += "  ";
-                }
-            }
+        else {
+            f << stringf(");");
         }
-
-        for (auto it = sync->actions.begin(); it != sync->actions.end(); ++it) {
-            if (it->first.size() == 0)
-                continue;
-            f << stringf("%s  ", indent.c_str());
-            dump_sigspec(f, it->first);
-            f << stringf(" <= ");
-            dump_sigspec(f, it->second);
-            f << ";\n";
-        }
-
-        f << ends;
+        f << stringf("\n");
     }
 }
 
@@ -2374,41 +2448,11 @@ void dump_module(std::ostream &f, std::string indent, RTLIL::Module *module)
             port_wires.insert({ wire->port_id, wire });
         }
     }
+
+    write_header_imports(f, indent);
     dump_attributes(f, indent, module->attributes, /*modattr=*/true);
     f << indent << "entity " << id(module->name, false) << " is\n";
-    {
-        INDENT
-        f << indent << "port (\n";
-
-        for (auto wire_it = port_wires.cbegin(); wire_it != port_wires.cend(); wire_it++) {
-            Wire *wire = wire_it->second;
-            f << NEXT_INDENT(indent) << id(wire->name) << " : ";
-            // TODO: Verilog inout = VHDL inout?
-            if (wire->port_input && wire->port_output) {
-                f << stringf(" inout ");
-            }
-            else if (wire->port_input && !wire->port_output) {
-                f << stringf(" in ");
-            }
-            else if (!wire->port_input && wire->port_output) {
-                f << stringf(" out ");
-            }
-            else {
-                // Should never execute
-                log_error("Port %s is neither an input nor an output\n", id(wire->name).c_str());
-            }
-            // TODO: verify arithmetic
-            f << wire_typestr(wire);
-            auto wire_it_next = std::next(wire_it);
-            if (wire_it_next != port_wires.cend()) {
-                f << stringf(";");
-            }
-            else {
-                f << stringf(");");
-            }
-            f << stringf("\n");
-        }
-    }
+    dump_port_decl(f, NEXT_INDENT(indent), port_wires);
     f << indent << "end entity " << id(module->name, false) << ";\n\n";
 
     // Architecture
@@ -2418,15 +2462,31 @@ void dump_module(std::ostream &f, std::string indent, RTLIL::Module *module)
     for (auto cell : module->cells()) {
         if (!is_internal_cell(cell->type)) {
             for (auto it = cell->connections().begin(); it != cell->connections().end(); ++it) {
-                if (it->second.size() > 1 &&
-                    it->second.chunks().size() > 1) { // TODO only check chunks?
-                    if (cell->output(it->first)) {
-                        auto new_wire = module->addWire(NEW_ID, it->second.size());
-                        module->connect(it->second, new_wire);
-                        cell->setPort(it->first, new_wire);
-                        reset_auto_counter_id(new_wire->name, true);
+                bool is_chunks = it->second.chunks().size() > 1;
+                if (cell->output(it->first) && is_chunks) {
+                    auto new_wire = module->addWire(NEW_ID, it->second.size());
+                    module->connect(it->second, new_wire);
+                    cell->setPort(it->first, new_wire);
+                    reset_auto_counter_id(new_wire->name, true);
+                }
+                else if (!std08) {
+                    if (it->second.is_wire() &&
+                        it->second.as_wire()->port_output) { // parent output ports cannot be read
+                        // if (cell->input(it->first)) {
+                        //     auto new_wire = module->addWire(NEW_ID, it->second.size());
+                        //     module->connect(new_wire, it->second);
+                        //     cell->setPort(it->first, new_wire);
+                        //     reset_auto_counter_id(new_wire->name, true);
+                        // }
+                        // else if (cell->output(it->first)) {
+                        //     auto new_wire = module->addWire(NEW_ID, it->second.size());
+                        //     module->connect(it->second, new_wire);
+                        //     cell->setPort(it->first, new_wire);
+                        //     reset_auto_counter_id(new_wire->name, true);
+                        // }
                     }
-                    else if (!std08 && cell->input(it->first)) { // TODO verify
+                    else if (cell->input(it->first) &&
+                             is_chunks) { // also input/inout? ports if not std08
                         auto new_wire = module->addWire(NEW_ID, it->second.size());
                         module->connect(new_wire, it->second);
                         cell->setPort(it->first, new_wire);
@@ -2462,23 +2522,6 @@ void dump_module(std::ostream &f, std::string indent, RTLIL::Module *module)
     active_module = NULL;
     active_sigmap.clear();
     active_initdata.clear();
-}
-
-void write_header_imports(std::ostream &f, std::string indent)
-{
-    f << indent << "library IEEE;\n";
-    f << indent << "use IEEE.std_logic_1164.ALL;\n";
-    // Could scan for arithmetic-type cells, but this is too cumbersome
-    f << indent << "use IEEE.NUMERIC_STD.ALL;\n";
-    if (extmem) {
-        f << indent << "\nuse STD.TEXTIO.ALL\n";
-    }
-    if (unisim) {
-        f << indent << "\n";
-        f << indent << "library unisim;\n";
-        f << indent << "use unisim.VCOMPONENTS.all;\n";
-        f << indent << "use unisim.VPKG.all;\n";
-    }
 }
 
 struct VHDLBackend : public Backend {
@@ -2689,7 +2732,6 @@ struct VHDLBackend : public Backend {
 #endif
         // TODO: check all log calls to see if \n is needed
         log_experimental("VHDL backend");
-        write_header_imports(*f, "");
         for (auto module : design->modules()) {
             if (module->get_blackbox_attribute() != blackboxes)
                 continue;
