@@ -42,7 +42,7 @@ do_plugin () {
 gstart "[Build] ghdl/synth:beta" "$ANSI_MAGENTA"
 
 docker build -t ghdl/synth:beta . -f- <<-EOF
-ARG REGISTRY='gcr.io/hdl-containers/debian/bullseye'
+ARG REGISTRY='ghcr.io/hdl/debian/bullseye'
 
 #---
 
@@ -88,7 +88,7 @@ do_formal () {
 gstart "[Build] ghdl/synth:formal" "$ANSI_MAGENTA"
 
 docker build -t ghdl/synth:formal . -f- <<-EOF
-ARG REGISTRY='gcr.io/hdl-containers/debian/bullseye'
+ARG REGISTRY='ghcr.io/hdl/debian/bullseye'
 
 #--
 
@@ -104,8 +104,10 @@ COPY --from=pkg-symbiyosys /symbiyosys /
 RUN apt-get update -qq \
  && DEBIAN_FRONTEND=noninteractive apt-get -y install --no-install-recommends \
     python3 \
+    python3-pip \
  && apt-get autoclean && apt-get clean && apt-get -y autoremove \
- && rm -rf /var/lib/apt/lists/*
+ && rm -rf /var/lib/apt/lists/*\
+ && python3 -m pip install click --progress-bar off
 EOF
 
 gend

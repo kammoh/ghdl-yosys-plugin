@@ -5,7 +5,7 @@
   -->
   <a title="Docker Images" href="https://github.com/ghdl/docker"><img src="https://img.shields.io/docker/pulls/ghdl/synth.svg?logo=docker&logoColor=e8ecef&style=flat-square&label=docker"></a><!--
   -->
-  <a title="'push' workflow Status" href="https://github.com/ghdl/ghdl-yosys-plugin/actions?query=workflow%3Apush"><img alt="'push' workflow Status" src="https://img.shields.io/github/workflow/status/ghdl/ghdl-yosys-plugin/push?longCache=true&style=flat-square&label=push&logo=Github%20Actions&logoColor=fff"></a>
+  <a title="'push' workflow Status" href="https://github.com/ghdl/ghdl-yosys-plugin/actions/workflows/push.yml"><img alt="'push' workflow Status" src="https://img.shields.io/github/actions/workflow/status/ghdl/ghdl-yosys-plugin/push.yml?branch=master&longCache=true&style=flat-square&label=push&logo=Github%20Actions&logoColor=fff"></a>
 </p>
 
 # ghdl-yosys-plugin: VHDL synthesis (based on [GHDL](https://github.com/ghdl/ghdl) and [Yosys](https://github.com/YosysHQ/yosys))
@@ -63,9 +63,16 @@ GHDL_PREFIX := <ghdl install dir>
 
 Some projects provide pre-built packages including GHDL, Yosys and ghdl-yosys-plugin. Unless you have specific requirements (targeting a different arch, OS, build options...), we suggest using one of the following solutions before building ghdl-yosys-plugin from sources.
 
-- [open-tool-forge/fpga-toolchain](https://github.com/open-tool-forge/fpga-toolchain) provides tarballs for GNU/Linux, Windows or macOS, including statically built EDA tools. Packages are available for x86 or amd64.
-
 - On Windows, there is a package group in [MSYS2](https://www.msys2.org/) repositories named [mingw-w64-x86_64-eda](https://packages.msys2.org/group/mingw-w64-x86_64-eda)|[mingw-w64-i686-eda](https://packages.msys2.org/group/mingw-w64-i686-eda). See [hdl/MINGW-packages](https://github.com/hdl/MINGW-packages).
+
+- On GNU/Linux, the [guix-science](https://codeberg.org/guix-science/guix-science) [guix](https://guix.gnu.org/) channel provides binaries for both ghdl and ghdl-yosys-plugin
+
+```sh
+guix install ghdl-clang ghdl-yosys-plugin
+
+# use it as
+alias yosys='yosys -m ~/.guix-profile/lib/yosys/ghdl.so'
+```
 
 ## Usage
 

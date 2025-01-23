@@ -563,7 +563,7 @@ static void import_memory(RTLIL::Module *module, std::vector<RTLIL::Wire *> &net
                         vec.resize(nbr_wr);
 			// Emitted write ports (ie j <= widx) don't have priority.
                         for (int j = 0; j < nbr_wr; j++)
-                                vec[j] = j <= widx ? RTLIL::State::S0 : RTLIL::State::S1;
+                                vec[j] = j < widx ? RTLIL::State::S1 : RTLIL::State::S0;
                         p->parameters[ID::PRIORITY_MASK] = Const(vec);
                         break;
 		default:
@@ -757,6 +757,7 @@ static void import_module(RTLIL::Design *design, GhdlSynth::Module m)
 		case Id_Idff:
 		case Id_Adff:
 		case Id_Iadff:
+		case Id_Dlatch:
 		case Id_Eq:
 		case Id_Ne:
 		case Id_Ult:
@@ -1088,6 +1089,9 @@ static void import_module(RTLIL::Design *design, GhdlSynth::Module m)
 					net_map[get_output(inst, 0).id]->attributes[ID::init] = IN(4).as_const();
 				}
 			}
+			break;
+		case Id_Dlatch:
+			module->addDlatch(to_str(iname), IN(1), IN(0), OUT(0));
 			break;
 		case Id_User_None:
 		case Id_User_Parameters:
