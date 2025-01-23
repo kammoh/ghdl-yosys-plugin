@@ -297,10 +297,10 @@ bool is_reg_wire(RTLIL::SigSpec sig, std::string &reg_name)
 }
 
 // convert Const::bits to a vector of char representations
-inline std::vector<char> bits_to_binary(const RTLIL::Const &data)
+inline const std::vector<char> bits_to_binary(const RTLIL::Const &data)
 {
     std::vector<char> bin_digits;
-    for (auto bit : data.bits) {
+    for (const auto bit : data.to_bits()) {
         switch (bit) {
         case State::S0:
             bin_digits.push_back('0');
@@ -437,7 +437,7 @@ void dump_const(std::ostream &f, const RTLIL::Const &const_data, int width = -1,
         return;
     }
     if (std08) { // extend with zeros and add width prefix
-        f << data.bits.size();
+        f << data.bits().size();
     }
     else if (leftovers) {
         f << "(";
@@ -456,11 +456,11 @@ void dump_reg_init(std::ostream &f, SigSpec sig)
 
     for (auto bit : active_sigmap(sig)) {
         if (active_initdata.count(bit)) {
-            initval.bits.push_back(active_initdata.at(bit));
+            initval.bits().push_back(active_initdata.at(bit));
             gotinit = true;
         }
         else {
-            initval.bits.push_back(State::Sx);
+            initval.bits().push_back(State::Sx);
         }
     }
 
